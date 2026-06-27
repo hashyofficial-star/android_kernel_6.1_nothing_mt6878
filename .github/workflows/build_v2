@@ -1,0 +1,101 @@
+name: MT6878 KernelSU Next Build (V2)
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      KBUILD_BUILD_USER: hashy
+      KBUILD_BUILD_HOST: github-actions
+      LLVM: 1
+      LLVM_IAS: 1
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+
+    - name: Get build info
+      run: |
+        echo "BUILD_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
+        echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          git curl zip unzip bc bison flex \
+          build-essential libssl-dev libelf-dev \
+          libncurses-dev python3 clang lld llvm ccache
+
+    - name: Setup ccache
+      run: |
+        export CCACHE_DIR=$HOME/.ccache
+        ccache -M 10G
+        echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+
+    - name: Cache kernel output
+      uses: actions/cache@v4
+      with:
+        path: out
+        key: kernel-out-${{ github.sha }}
+
+    - name: Clone AnyKernel3
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+    - name: Apply KernelSU Next (stable)
+      run: |
+        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/stable/kernel/setup.sh | bash -
+
+    - name: Build kernel
+      run: |
+        make O=out clean
+        make O=out defconfig
+        make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 2>&1 | tee build.log
+
+    - name: Prepare AnyKernel
+      run: |
+        mkdir -p AnyKernel3/modules
+
+        # Detect kernel image
+        IMG=$(find out/arch/arm64/boot -type f \( -name "Image" -o -name "Image.gz" -o -name "Image.gz-dtb" \) | head -n 1)
+
+        if [ -z "$IMG" ]; then
+          echo "No kernel image found!"
+          exit 1
+        fi
+
+        cp "$IMG" AnyKernel3/
+
+        cd AnyKernel3
+
+        ZIP_NAME="KernelSU-MT6878-${BUILD_DATE}-${COMMIT}.zip"
+
+        zip -r9 "$ZIP_NAME" . -x "*.git*" README.md
+
+        echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+    - name: Upload kernel zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ZIP_NAME }}
+        path: AnyKernel3/*.zip
+
+    - name: Upload Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-image
+        path: out/arch/arm64/boot/Image*
+
+    - name: Upload build log
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: build.log
