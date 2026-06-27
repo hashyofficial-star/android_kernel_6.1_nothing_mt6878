@@ -1,59 +1,77 @@
-name: Kernel Build (MT6878 - 6.1)
+name: MT6878 Kernel Build (KernelSU Next)
 
 on:
   workflow_dispatch:
   push:
-  pull_request:
 
 jobs:
   build:
     runs-on: ubuntu-24.04
 
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      KBUILD_BUILD_USER: hashy
+      KBUILD_BUILD_HOST: github-actions
+      LLVM: 1
+      LLVM_IAS: 1
+
     steps:
     - name: Checkout kernel source
       uses: actions/checkout@v4
 
-    - name: Cleanup runner
+    - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y git curl zip unzip
-
-    - name: Install build dependencies
-      run: |
-        sudo apt-get install -y \
-          bc bison flex libssl-dev make \
-          libc6-dev libncurses5-dev libelf-dev \
-          python3 python3-pip \
-          clang lld llvm \
-          ccache
+        sudo apt update
+        sudo apt install -y \
+          git curl zip unzip bc bison flex \
+          build-essential libssl-dev libelf-dev \
+          libncurses-dev python3 clang lld llvm ccache
 
     - name: Setup ccache
       run: |
         export CCACHE_DIR=$HOME/.ccache
-        echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
         ccache -M 10G
+        echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
 
     - name: Clone AnyKernel3
       run: |
         git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-    - name: Setup KernelSU Next
-      run: bash scripts/kernelsu.sh
+    - name: Apply KernelSU Next (stable)
+      run: |
+        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/stable/kernel/setup.sh | bash -
 
     - name: Build kernel
-      run: bash scripts/build.sh
+      run: |
+        make O=out clean
+        make O=out defconfig
+        make -j$(nproc) O=out LLVM=1 LLVM_IAS=1
 
-    - name: Package AnyKernel
-      run: bash scripts/package.sh
+    - name: Prepare AnyKernel
+      run: |
+        mkdir -p AnyKernel3/modules
+
+        KERNEL_IMG=$(find out/arch/arm64/boot -name "Image*" | head -n 1)
+
+        if [ ! -f "$KERNEL_IMG" ]; then
+          echo "Kernel Image not found!"
+          exit 1
+        fi
+
+        cp $KERNEL_IMG AnyKernel3/
+
+        cd AnyKernel3
+        zip -r9 KernelSU-MT6878.zip . -x "*.git*" README.md
 
     - name: Upload kernel zip
       uses: actions/upload-artifact@v4
       with:
-        name: KernelSU-Kernel
+        name: KernelSU-MT6878
         path: AnyKernel3/*.zip
 
-    - name: Upload Image (raw)
+    - name: Upload raw Image
       uses: actions/upload-artifact@v4
       with:
-        name: Image
+        name: kernel-image
         path: out/arch/arm64/boot/Image*
