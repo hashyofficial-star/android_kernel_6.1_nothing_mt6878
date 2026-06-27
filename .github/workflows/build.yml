@@ -1,0 +1,59 @@
+name: Kernel Build (MT6878 - 6.1)
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
+
+    - name: Cleanup runner
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git curl zip unzip
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get install -y \
+          bc bison flex libssl-dev make \
+          libc6-dev libncurses5-dev libelf-dev \
+          python3 python3-pip \
+          clang lld llvm \
+          ccache
+
+    - name: Setup ccache
+      run: |
+        export CCACHE_DIR=$HOME/.ccache
+        echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+        ccache -M 10G
+
+    - name: Clone AnyKernel3
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+    - name: Setup KernelSU Next
+      run: bash scripts/kernelsu.sh
+
+    - name: Build kernel
+      run: bash scripts/build.sh
+
+    - name: Package AnyKernel
+      run: bash scripts/package.sh
+
+    - name: Upload kernel zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: KernelSU-Kernel
+        path: AnyKernel3/*.zip
+
+    - name: Upload Image (raw)
+      uses: actions/upload-artifact@v4
+      with:
+        name: Image
+        path: out/arch/arm64/boot/Image*
