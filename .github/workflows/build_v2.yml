@@ -1,101 +1,98 @@
-name: MT6878 KernelSU Next Build (V2)
+name: Full Hands-Free CMF1 Build (Kernel + Auto-Packed vendor_dlkm)
 
 on:
   workflow_dispatch:
-  push:
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04
-
-    env:
-      ARCH: arm64
-      SUBARCH: arm64
-      KBUILD_BUILD_USER: hashy
-      KBUILD_BUILD_HOST: github-actions
-      LLVM: 1
-      LLVM_IAS: 1
-
+  build-and-pack:
+    runs-on: ubuntu-22.04
     steps:
-    - name: Checkout source
-      uses: actions/checkout@v4
+      - name: Maximize Storage Workspace
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
 
-    - name: Get build info
-      run: |
-        echo "BUILD_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
-        echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      - name: Install Compiling Toolchains and Image Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev erofs-utils
 
-    - name: Install dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y \
-          git curl zip unzip bc bison flex \
-          build-essential libssl-dev libelf-dev \
-          libncurses-dev python3 clang lld llvm ccache
+      - name: Initialize Android Repo Tool
+        run: |
+          mkdir -p ~/bin
+          curl https://googleapis.com > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "PATH=$HOME/bin:$PATH" >> $GITHUB_ENV
 
-    - name: Setup ccache
-      run: |
-        export CCACHE_DIR=$HOME/.ccache
-        ccache -M 10G
-        echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+      - name: Sync Google ACK Workspace (Android 15 - Kernel 6.1)
+        run: |
+          export PATH=$HOME/bin:$PATH
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          mkdir workspace && cd workspace
+          repo init -u https://googlesource.com -b android15-6.1
+          repo sync -j$(nproc --all) --current-branch --no-tags --no-clone-bundle
 
-    - name: Cache kernel output
-      uses: actions/cache@v4
-      with:
-        path: out
-        key: kernel-out-${{ github.sha }}
+      - name: Force Upgrade ACK to Upstream 6.1.162
+        run: |
+          cd workspace/common
+          git fetch https://kernel.org linux-6.1.y
+          git merge FETCH_HEAD --no-edit
 
-    - name: Clone AnyKernel3
-      run: |
-        git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+      - name: Embed KernelSU Next Framework
+        run: |
+          cd workspace/common
+          curl -LSs "https://githubusercontent.com" | bash -s main
 
-    - name: Apply KernelSU Next (stable)
-      run: |
-        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/stable/kernel/setup.sh | bash -
+      - name: Inject Nothing OSS Repositories (Explicit Tetris Branches)
+        run: |
+          cd workspace
+          
+          # 1. Overlay Nothing's core kernel configurations (6.1 repo) over Google's common framework
+          git clone --depth=1 -b mt6878/Tetris/16b https://github.com/NothingOSS/android_kernel_6.1_nothing_mt6878 private/nothing-kernel-src
+          cp -r private/nothing-kernel-src/* common/
+          rm -rf private/nothing-kernel-src
 
-    - name: Build kernel
-      run: |
-        make O=out clean
-        make O=out defconfig
-        make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 2>&1 | tee build.log
+          # 2. Clone the core build tool layout (Uses master branch)
+          git clone --depth=1 https://github.com/NothingOSS/android_kernel_build_nothing_mt6878 build
 
-    - name: Prepare AnyKernel
-      run: |
-        mkdir -p AnyKernel3/modules
+          # 3. Add Device Peripheral Modules (Display, Touch, Charging drivers)
+          git clone --depth=1 -b mt6878/Tetris/16b https://github.com/NothingOSS/android_kernel_device_modules_6.1_nothing_mt6878 private/nothing-modules
 
-        # Detect kernel image
-        IMG=$(find out/arch/arm64/boot -type f \( -name "Image" -o -name "Image.gz" -o -name "Image.gz-dtb" \) | head -n 1)
+          # 4. Add Core SoC/Platform Modules (Camera, GPU, Wi-Fi drivers)
+          git clone --depth=1 -b mt6878/Tetris/16b https://github.com/NothingOSS/android_kernel_modules_nothing_mt6878 private/nothing-soc-modules
 
-        if [ -z "$IMG" ]; then
-          echo "No kernel image found!"
-          exit 1
-        fi
+      - name: Execute Bazel Compilation
+        run: |
+          export PATH=$HOME/bin:$PATH
+          cd workspace
+          echo "KMI_SYMBOL_LIST_STRICT_MODE=false" >> common/build.config.gki.aarch64
+          tools/bazel run --config=fast //common:kernel_aarch64_dist
 
-        cp "$IMG" AnyKernel3/
+      - name: Automated vendor_dlkm.img Generation
+        run: |
+          cd workspace
+          mkdir -p dlkm_root/lib/modules
+          
+          echo "Gathering compiled driver modules from ALL build endpoints..."
+          # Recursively finds all newly compiled .ko drivers from both device-modules and soc-modules outputs
+          find out/android15-6.1/dist/ -name "*.ko" -exec cp {} dlkm_root/lib/modules/ \;
+          
+          echo "Generating driver dependency mapping..."
+          depmod -b dlkm_root/ 6.1.162
+          
+          echo "Packing EROFS Partition Image File..."
+          mkfs.erofs ../vendor_dlkm.img dlkm_root/
 
-        cd AnyKernel3
-
-        ZIP_NAME="KernelSU-MT6878-${BUILD_DATE}-${COMMIT}.zip"
-
-        zip -r9 "$ZIP_NAME" . -x "*.git*" README.md
-
-        echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-
-    - name: Upload kernel zip
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.ZIP_NAME }}
-        path: AnyKernel3/*.zip
-
-    - name: Upload Image
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-image
-        path: out/arch/arm64/boot/Image*
-
-    - name: Upload build log
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log
-        path: build.log
+      - name: Export Ready-To-Flash Flashing Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMF1-Flashable-Assets-6.1.162
+          path: |
+            workspace/out/android15-6.1/dist/Image
+            vendor_dlkm.img
