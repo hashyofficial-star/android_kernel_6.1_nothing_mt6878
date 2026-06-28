@@ -1,1 +1,34 @@
+- name: Inspect kernel
+  if: always()
+  run: |
+    mkdir inspect
 
+    echo "===== Build Scripts =====" > inspect/report.txt
+    find . -maxdepth 2 \( \
+      -name "build.sh" -o \
+      -name "build.config*" -o \
+      -name "BUILD.bazel" -o \
+      -name "*.bazel" -o \
+      -name "build_*.sh" \) >> inspect/report.txt
+
+    echo "" >> inspect/report.txt
+    echo "===== Kernel Images =====" >> inspect/report.txt
+    find out/arch/arm64/boot -maxdepth 2 -type f >> inspect/report.txt
+
+    echo "" >> inspect/report.txt
+    echo "===== Generated Config =====" >> inspect/report.txt
+    grep CONFIG_KERNELSU out/.config >> inspect/report.txt || true
+    grep CONFIG_KSU out/.config >> inspect/report.txt || true
+
+    echo "" >> inspect/report.txt
+    echo "===== Build Config =====" >> inspect/report.txt
+    grep "^CONFIG_LOCALVERSION" out/.config >> inspect/report.txt || true
+
+    cp out/.config inspect/kernel.config || true
+
+- name: Upload inspection
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: inspection
+    path: inspect
